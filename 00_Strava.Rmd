@@ -1,0 +1,281 @@
+---
+title: "00_Strava"
+author: "Logan Wu"
+date: "13/07/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(rStrava)
+library(patchwork)
+library(cowplot)
+library(httr)
+
+source("client.R")
+```
+
+# Authenticate token
+
+```{r}
+# Get token if it doesn't already exist
+if (!file.exists("token.rds")) {
+  token = strava_oauth(app.name, client.id, secret, app_scope="activity:read_all")
+} else {
+  token = read_rds("token.rds")
+  token = token$refresh()
+}
+write_rds(token, "token.rds")
+stoken <- config(token = token)
+```
+
+# Get relevant data from Strava
+
+```{r}
+my.activities = get_activity_list(stoken)
+my.activities.df = my.activities %>% compile_activities %>% as_tibble
+df = my.activities.df %>%
+  select(start_date_local, distance) %>%
+  mutate(start_date_local = ymd_hms(start_date_local))
+```
+
+# Plot
+
+```{r}
+# Plotting parameters
+start.date = ymd("2020-04-01")
+week.starts.on = "Sunday"
+# index by week since first date so years don't overlap
+prev.days = seq(start.date-6, start.date, by='day')
+start.sunday = prev.days[weekdays(prev.days) == week.starts.on]
+
+# Generate plot data
+plot.df = tibble(date = seq(start.date, today(), by = "day")) %>%
+  left_join(df %>% mutate(date = date(start_date_local)), by = "date") %>%
+  group_by(date) %>%
+  summarise(distance = distance %>% sum(na.rm=T) %>% na_if(0), .groups = "drop") %>%
+  mutate(year = year(date),
+         week = epiweek(date),
+         wday = wday(date, label=T),
+         month = month(date, label=T),
+         days_since_origin = date - start.sunday %>% as.integer,
+         weeks_since_origin = as.integer(days_since_origin) %/% 7,
+         cumulative.distance = distance %>% replace_na(0),
+         cumulative.distance = cumsum(cumulative.distance))
+
+plot.ticks = plot.df %>%
+  select(month, weeks_since_origin) %>%
+  group_by(month) %>%
+  slice(1)
+
+# Specify parameters for plot
+text.color = "grey30"
+na.color = "lightgrey"
+total.km = sum(plot.df$distance, na.rm=T)
+total.months = length(plot.ticks$month)
+plot.title = paste(round(total.km), "km in the past", total.months, "months")
+
+# Create plot
+g1 = ggplot(plot.df) +
+  geom_tile(aes(x = weeks_since_origin, y = wday, fill = distance), width=0.9, height=0.9) +
+  coord_equal() +
+  scale_x_continuous(breaks = plot.ticks$weeks_since_origin,
+                     labels = plot.ticks$month,
+                     position = "top",
+                     expand = c(0, 0)) +
+  scale_y_discrete(limits = rev) +
+  scale_fill_steps(labels = function (x) paste(x, "km"),
+                   na.value = na.color,
+                   guide = guide_legend(override.aes = aes(color = "white", size = 8), reverse = T)) +
+  labs(title = plot.title, fill = NULL) +
+  theme_void() +
+  theme(axis.text.x = element_text(margin = margin(b = 5)),
+        axis.text.y = element_text(margin = margin(r = 10), hjust = 1),
+        legend.margin = margin(l = 10),
+        plot.title = element_text(hjust = 0.5, margin = margin(b = 10)),
+        text = element_text(color = text.color),
+        plot.margin = margin(10, 10, 10, 10)) +
+  ggsave("plot_strava.svg", height = 2.8, width = 6)
+g1
+```
+
+## Density plot
+
+```{r}
+g1a = ggplot(plot.df) +
+  geom_tile(aes(x = weeks_since_origin, y = wday, fill = distance), width=0.9, height=0.9) +
+  coord_equal() +
+  scale_x_continuous(breaks = plot.ticks$weeks_since_origin,
+                     labels = plot.ticks$month,
+                     position = "top",
+                     expand = c(0, 0)) +
+  scale_y_discrete(limits = rev) +
+  scale_fill_steps(labels = function (x) paste(x, "km"),
+                   na.value = na.color,
+                   guide = guide_legend(override.aes = aes(color = "white", size = 8), reverse = T)) +
+  labs(fill = NULL) +
+  theme_void() +
+  theme(axis.text.x = element_text(margin = margin(b = 5)),
+        axis.text.y = element_text(margin = margin(r = 10), hjust = 1),
+        legend.margin = margin(l = 10),
+        plot.title = element_text(hjust = 0.5, margin = margin(b = 10)),
+        text = element_text(color = text.color),
+        plot.margin = margin(5, 10, 10, 10))
+plot.df2 = plot.df %>%
+  group_by(weeks_since_origin) %>%
+  summarise(distance = sum(distance, na.rm=T), .groups = "drop")
+plot.df2.max = plot.df %>%
+  group_by(weeks_since_origin) %>%
+  summarise(distance = sum(distance, na.rm=T), .groups = "drop") %>%
+  filter(distance==max(distance, na.rm=T)) %>%
+  mutate(label = distance %>% round(1) %>% paste("km"))
+first.week = min(plot.df2$weeks_since_origin[plot.df2$distance>0])
+last.week = max(plot.df2$weeks_since_origin)
+av.perweek = sum(plot.df2$distance, na.rm=T) / (last.week - first.week + 1)
+av.perweek.df = tibble(xmin = first.week, xmax=last.week, distance=av.perweek)
+g2 = ggplot(plot.df2, aes(x = weeks_since_origin, y = distance)) +
+  geom_col(fill = na.color) +#, color="white") +
+  geom_text(data=plot.df2.max, aes(label = label), size=3, hjust=0, vjust=1, nudge_x=0.5, color=text.color) +
+  # geom_hline(yintercept=av.perweek, color="firebrick", alpha=0.5) +
+  # geom_segment(data=av.perweek.df, aes(x=xmin, y=distance, xend=xmin, yend=distance), color="firebrick", alpha=0.5) +
+  coord_fixed(0.05) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_fill_steps(labels = function (x) paste(x, "km"),
+                   na.value = na.color,
+                   guide = guide_legend(override.aes = aes(color = "white", size = 8), reverse = T)) +
+  labs(title = plot.title, x = NULL, y = NULL) +
+  theme_void() +
+  theme(legend.position = "none") +
+  ggsave("plot_strava_bar.svg", height = 2.8, width = 6)
+
+
+# legend = get_legend(g1a + theme(legend.justification = "left"))
+# prow = plot_grid(g2, g1a + theme(legend.position = "none"), align = "v", ncol = 1)
+# gg = plot_grid(prow, legend, rel_widths = c(10, 2))
+# gg
+gg = g2 / g1a
+gg + ggsave("plot_strava_combined.png", height=3, width=8) + ggsave("plot_strava_combined.svg", height=3, width=8)
+```
+
+## Plotly version
+
+```{r}
+library(plotly)
+plotly.df = plot.df %>%
+  mutate(text = paste0("<b>", round(distance, 1), " km", "</b><br>", format(date, "%d %B %Y")),
+         text = ifelse(is.na(distance), NA, text),
+         rounded = round(distance),
+         isna = ifelse(is.na(distance), 1, 0))
+vals = unique(plotly.df$rounded) %>% sort
+colfunc = colorRampPalette(c("#17344f", "#53abef"))
+cols = colfunc(length(vals))
+colorscale = tibble(z = 0, col = "#000000") %>% bind_rows(tibble(z = vals, col = cols))
+colorscale2 = list(list(1, "grey"), list(0, "#00000000"))
+plot_ly(plotly.df) %>%
+  add_heatmap(x = ~weeks_since_origin, y = ~wday, z = ~distance, text = ~text,
+              hoverinfo = "text", xgap=4, ygap=4,
+              # colors = cols,
+              colorscale = colorscale) %>%
+  # add_heatmap(x = ~weeks_since_origin, y = ~wday, z = ~isna, text = ~text,
+  #             hoverinfo = "text", xgap=4, ygap=4,
+  #             colorscale = colorscale2,
+  #             # colors = "Greys",
+  #             showscale = F) %>%
+  colorbar(title = NA) %>%
+  layout(xaxis = list(tickmode = "array",
+                      tickvals = plot.ticks$weeks_since_origin,
+                      ticktext = plot.ticks$month,
+                      showgrid = F,
+                      zeroline = F,
+                      ticklen = 0,
+                      side = "top",
+                      title = NA),
+         yaxis = list(autorange = "reversed",
+                      showgrid = F,
+                      ticklen = 0,
+                      title = NA,
+                      scaleanchor = "x"),
+         title = list(text = "Logan's Strava"))
+```
+
+## Apexcharts version
+
+```{r}
+library(apexcharter)
+library(jsonlite)
+
+distance.perdate = df %>%
+  mutate(date = date(start_date_local)) %>%
+  group_by(date) %>%
+  summarise(distance = distance %>% sum(na.rm=T) %>% round(1), .groups = "drop")
+
+plot.df2 = tibble(date = seq(start.sunday, today(), by = "day")) %>%
+  left_join(distance.perdate) %>%
+  # filter(distance > 0) %>%
+  mutate(year = year(date),
+         week = epiweek(date),
+         wday = wday(date, label = T),
+         month = month(date, label=T),
+         days_since_origin = date - start.sunday %>% as.integer,
+         weeks_since_origin = as.integer(days_since_origin) %/% 7) %>%
+  arrange(weeks_since_origin, desc(wday))
+
+plot.ticks.js = toJSON(plot.ticks, dataframe = "columns")
+tick.fn = paste("function (x) {
+  ticks = ", plot.ticks.js, "
+  ix = ticks[\"weeks_since_origin\"].indexOf(x)
+  if (ix < 0) {
+    value = \"\"
+  } else {
+    value = ticks[\"month\"][ix]
+  }
+  return value
+}")
+
+a = apex(plot.df2, aes(x = weeks_since_origin, y = wday, color = distance), type = "heatmap") %>%
+  ax_colors("#008FFB") %>%
+  ax_xaxis(labels = list(formatter = htmlwidgets::JS(tick.fn)),
+           axisTicks = list(show = F),
+           tooltip = list(enabled = F),
+           tickAmount = length(unique(plot.df2$weeks_since_origin)) - 1,
+           position = "top",
+           tickPlacement = "on") %>%
+  ax_dataLabels(enabled = F) %>%
+  ax_labs(title = "Logan's Strava", subtitle = plot.title)
+a
+```
+
+## Cumulative
+
+```{r}
+cum.df = tibble(date = start.date,
+                distance = 0) %>%
+  bind_rows(plot.df) %>%
+  bind_rows(tibble(date = today(),
+                   distance = 0)) %>%
+  arrange(date) %>%
+  filter(!is.na(distance)) %>%
+  mutate(Distance = cumsum(distance))
+
+total.wks = length(unique(cum.df$weeks_since_origin))
+date.max = max(cum.df$date)
+date.min = min(cum.df$date[cum.df$distance > 0])
+date.range = date.max - date.min + 1
+wk.range = as.numeric(date.range) / 7
+avg.km.per.wk = total.km / wk.range
+
+a = apex(cum.df, aes(x = date, y = Distance), type = "area-step") %>%
+  ax_yaxis(labels = list(formatter = htmlwidgets::JS("function (x) {return Math.round(x) + ' km';}"))) %>%
+  ax_labs(title = "Logan's Strava", subtitle = paste("Averaging", round(avg.km.per.wk), "km per week since", format(date.min, "%d %B %Y")))
+a
+```
+
+## Random
+
+```{r, eval=F}
+id = 3813124056
+strms_data <- get_activity_streams(my.activities, stoken, id=id)
+```

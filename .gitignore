@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+client.R
+*.svg
+*.png
+*.txt
+*.rds
+*.html
+/Takeout/*

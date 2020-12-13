@@ -1,0 +1,82 @@
+---
+title: "02 Strava 3D"
+author: "Logan Wu"
+date: "13/07/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(rStrava)
+library(patchwork)
+library(httr)
+library(sf)
+library(elevatr)
+library(raster)
+
+source("client.R")
+```
+
+## Authenticate token
+
+```{r}
+# Get token if it doesn't already exist
+if (!file.exists("token.rds")) {
+  token = strava_oauth(app.name, client.id, secret, app_scope="activity:read_all")
+} else {
+  token = read_rds("token.rds")
+  token = token$refresh()
+}
+write_rds(token, "token.rds")
+stoken <- config(token = token)
+```
+
+## Get relevant data from Strava
+
+```{r}
+my.activities = get_activity_list(stoken)
+id = 3813124056
+activity.stream = get_activity_streams(my.activities, stoken, id=id)
+activity.sf = activity.stream %>%
+  filter(altitude > -100) %>%
+  st_as_sf(coords = c("lng", "lat", "altitude"), crs=4326) %>%
+  st_transform(28355) %>%
+  mutate(x = st_coordinates(.)[,1],
+         y = st_coordinates(.)[,2],
+         z = st_coordinates(.)[,3])
+```
+
+## Get terrain data
+
+```{r}
+ext = activity.sf %>% extent
+grid.data = raster(ext = ext, crs = CRS('+init=EPSG:28355'), res = 10)
+elevation = get_elev_raster(activity.sf %>% as_Spatial, z=12)
+elevation[][is.na(elevation[])] = 0
+elevation.df = rasterToPoints(elevation) %>% as_tibble
+coordinates = coordinates(elevation) %>% as_tibble
+x = unique(coordinates$x)
+y = unique(coordinates$y)
+x = matrix(x, nrow = length(y), ncol = length(x), byrow=T)
+y = matrix(y, nrow = length(y), ncol = length(x))
+z = as.matrix(elevation)
+
+lenX = length(unique(elevation.df$x))
+lenY = length(unique(elevation.df$y))
+z = matrix(elevation.df$layer, nrow=lenX, ncol =lenY, byrow = FALSE )
+# z = as.matrix(elevation)
+x = matrix(elevation.df$x, nrow=elevation@nrows, ncol=elevation@ncols, byrow = FALSE ) # longitude
+y = matrix(elevation.df$y, nrow=lenX, ncol =lenY, byrow = FALSE ) # latitude
+```
+
+## Plot RGL
+
+```{r}
+library(rgl)
+open3d()
+rgl.surface(y, z, x)
+plot3d(activity.sf$x, activity.sf$y, activity.sf$z, type="l")
+```

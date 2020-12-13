@@ -1,0 +1,94 @@
+---
+title: "01_Exploratory"
+author: "Logan Wu"
+date: "13/07/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(trackeR)
+```
+
+# Import from Google Takeout
+
+```{r}
+takeout.files = list.files("Takeout", "\\.tcx$", recursive=T, full.names=T)
+takeout = tibble(filename = takeout.files) %>%
+  mutate(activity = filename %>% str_remove(".*_") %>% str_remove("\\.tcx$"))
+takeout.running = takeout %>%
+  filter(activity %>% str_detect("R"))
+
+r = takeout$filename[1]
+r.tcx = lapply(takeout.running$filename, function (r) readTCX(r) %>% as_tibble %>% slice(n()))
+r.tcx = bind_rows(r.tcx) %>%
+  mutate(distance = distance[,1])
+```
+
+# Get relevant data
+
+```{r}
+df = r.tcx %>%
+  select(start_date_local = time, distance) %>%
+  mutate(distance = distance / 1000)
+```
+
+# Plot
+
+```{r}
+# Create plot data
+distance.df = tibble(date = seq(ymd("2017-01-01"), today(), by = "1 day")) %>%
+  left_join(df %>% mutate(date = date(start_date_local)), by = "date") %>%
+  group_by(date) %>%
+  summarise(distance = sum(distance, na.rm=T), .groups = "drop") %>%
+  mutate(year = year(date),
+         week = epiweek(date),
+         wday = wday(date, label=T),
+         month = month(date, label=T),
+         distance = na_if(distance, 0))
+
+plot.df = distance.df %>%
+  arrange(date) %>%
+  distinct(year, week) %>%
+  mutate(weekindex = row_number()) %>%
+  left_join(distance.df, by = c("year", "week"))
+  
+
+plot.ticks = plot.df %>%
+  select(month, year, weekindex) %>%
+  group_by(month, year) %>%
+  slice(1)
+
+# Specify parameters for plot
+text.color = "grey30"
+na.color = "lightgrey"
+total.km = sum(plot.df$distance, na.rm=T)
+total.months = length(plot.ticks$month)
+plot.title = paste(round(total.km), "km in the past", total.months, "months")
+
+# Create plot
+g = ggplot(plot.df) +
+  geom_tile(aes(x = weekindex, y = wday, fill = distance), width=0.9, height=0.9) +
+  coord_equal() +
+  scale_x_continuous(breaks = plot.ticks$weekindex,
+                     labels = plot.ticks$month,
+                     position = "top",
+                     expand = c(0, 0)) +
+  scale_y_discrete(limits = rev) +
+  scale_fill_steps(labels = function (x) paste(x, "km"),
+                   na.value = na.color,
+                   guide = guide_legend(override.aes = aes(color = "white", size = 8))) +
+  labs(title = plot.title, fill = NULL) +
+  theme_void() +
+  theme(axis.text.x = element_text(margin = margin(b = 5)),
+        axis.text.y = element_text(margin = margin(r = 10), hjust = 1),
+        legend.margin = margin(l = 10),
+        plot.title = element_text(hjust = 0.5, margin = margin(b = 10)),
+        text = element_text(color = text.color),
+        plot.margin = margin(10, 10, 10, 10)) +
+  ggsave("plot_gf.png", height = 3, width = 6)
+g
+```
